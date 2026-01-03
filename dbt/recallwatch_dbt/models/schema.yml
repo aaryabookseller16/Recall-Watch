@@ -1,0 +1,69 @@
+version: 2
+
+models:
+  - name: stg_recalls
+    columns:
+      - name: recall_pk
+        tests: [not_null, unique]
+
+  - name: stg_complaints
+    columns:
+      - name: complaint_pk
+        tests: [not_null, unique]
+
+  - name: dim_vehicle
+    columns:
+      - name: vehicle_id
+        tests: [not_null, unique]
+
+  - name: dim_component
+    columns:
+      - name: component_id
+        tests: [not_null, unique]
+
+  - name: dim_date
+    columns:
+      - name: date_id
+        tests: [not_null, unique]
+
+  - name: fact_recalls
+    columns:
+      - name: recall_pk
+        tests: [not_null, unique]
+      - name: vehicle_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_vehicle')
+              field: vehicle_id
+      - name: component_id
+        tests:
+          - relationships:
+              to: ref('dim_component')
+              field: component_id
+      - name: date_id
+        tests:
+          - relationships:
+              to: ref('dim_date')
+              field: date_id
+
+  - name: fact_complaints
+    columns:
+      - name: complaint_pk
+        tests: [not_null, unique]
+      - name: vehicle_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_vehicle')
+              field: vehicle_id
+      - name: component_id
+        tests:
+          - relationships:
+              to: ref('dim_component')
+              field: component_id
+      - name: date_id
+        tests:
+          - relationships:
+              to: ref('dim_date')
+              field: date_id
