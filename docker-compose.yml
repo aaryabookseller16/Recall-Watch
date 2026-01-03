@@ -1,0 +1,44 @@
+
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: recallwatch_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: recallwatch
+      POSTGRES_PASSWORD: recallwatch
+      POSTGRES_DB: recallwatch
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Optional: quick UI for exploring tables.
+  # Enable by uncommenting this service.
+  # metabase:
+  #   image: metabase/metabase:latest
+  #   container_name: recallwatch_metabase
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     MB_DB_TYPE: postgres
+  #     MB_DB_HOST: postgres
+  #     MB_DB_PORT: 5432
+  #     MB_DB_DBNAME: recallwatch
+  #     MB_DB_USER: recallwatch
+  #     MB_DB_PASS: recallwatch
+
+volumes:
+  pgdata:
+    name: recallwatch_pgdata

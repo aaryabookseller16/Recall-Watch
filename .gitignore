@@ -1,0 +1,68 @@
+
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# -----------------------------
+# Environment / secrets
+# -----------------------------
+.env
+.env.*
+*.env
+
+# -----------------------------
+# Jupyter / notebooks
+# -----------------------------
+.ipynb_checkpoints/
+
+# -----------------------------
+# OS files
+# -----------------------------
+.DS_Store
+Thumbs.db
+
+# -----------------------------
+# Logs
+# -----------------------------
+*.log
+logs/
+
+# -----------------------------
+# dbt
+# -----------------------------
+dbt/recallwatch_dbt/target/
+dbt/recallwatch_dbt/dbt_packages/
+dbt/recallwatch_dbt/logs/
+
+# -----------------------------
+# Docker
+# -----------------------------
+# Local bind mounts / data volumes (never commit DB data)
+pgdata/
+
+# -----------------------------
+# Editor / IDE
+# -----------------------------
+.vscode/
+.idea/
+
+# -----------------------------
+# Temporary files
+# -----------------------------
+*.tmp
+*.swp
