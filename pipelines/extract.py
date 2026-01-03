@@ -16,6 +16,7 @@ It does NOT:
 """
 
 from __future__ import annotations
+import os
 
 import time
 import logging
@@ -28,12 +29,28 @@ import requests
 # ---------------------------------------------------------------------
 
 SOCRATA_BASE_URL = "https://data.transportation.gov/resource"
-RECALLS_DATASET_ID = "86zz-ue7u"
-COMPLAINTS_DATASET_ID = "htum-kus7"
+
+# Socrata resource ids for tabular datasets
+# Recalls Data: https://data.transportation.gov/Automobiles/Recalls-Data/6axg-epim
+RECALLS_DATASET_ID = "6axg-epim"
+NHTSA_API_BASE_URL = "https://api.nhtsa.gov"
+
+# Candidate date fields (datasets can evolve)
+RECALLS_DATE_FIELDS = [
+    "report_received_date",
+    "report_receive_date",
+    "recall_date",
+    "date",
+]
 
 PAGE_SIZE = 1000
 REQUEST_TIMEOUT = 30
 RATE_LIMIT_SLEEP = 0.2  # seconds between requests
+
+# Optional: Socrata app token. Not always required, but some networks/WAFs
+# return 403 without a token or a non-empty User-Agent.
+SOCRATA_APP_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
+USER_AGENT = os.getenv("RECALLWATCH_USER_AGENT", "recallwatch/0.1 (+https://github.com/aaryabookseller16/Recall-Watch)")
 
 # ---------------------------------------------------------------------
 # Logging
@@ -52,6 +69,7 @@ logging.basicConfig(
 def _fetch_socrata(
     dataset_id: str,
     where_clause: Optional[str] = None,
+    max_pages: Optional[int] = None,
 ) -> List[Dict]:
     """
     Generic Socrata fetcher with pagination.
@@ -83,13 +101,27 @@ def _fetch_socrata(
         url = f"{SOCRATA_BASE_URL}/{dataset_id}.json"
 
         logger.info("Fetching %s | offset=%s", dataset_id, offset)
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        if SOCRATA_APP_TOKEN:
+            headers["X-App-Token"] = SOCRATA_APP_TOKEN
 
         response = requests.get(
             url,
             params=params,
             timeout=REQUEST_TIMEOUT,
+            headers=headers,
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Socrata sometimes returns 403 from certain networks unless a token
+            # and a non-empty User-Agent are provided.
+            msg = (
+                f"HTTP {response.status_code} fetching {url} with params={params}. "
+                f"Response: {response.text[:500]}"
+            )
+            raise requests.HTTPError(msg, response=response)
 
         page = response.json()
 
@@ -100,10 +132,40 @@ def _fetch_socrata(
         records.extend(page)
         offset += PAGE_SIZE
 
+        if max_pages is not None and (offset // PAGE_SIZE) >= max_pages:
+            logger.info("Reached max_pages=%s; stopping early.", max_pages)
+            break
+
         time.sleep(RATE_LIMIT_SLEEP)
 
     logger.info("Fetched %s total records from %s", len(records), dataset_id)
     return records
+
+# ---------------------------------------------------------------------
+# Helper functions for field detection and where clause building
+# ---------------------------------------------------------------------
+
+def _first_present_field(record: Dict, candidates: list[str]) -> Optional[str]:
+    for f in candidates:
+        if f in record:
+            return f
+    return None
+
+
+def _build_where_clause(
+    make_field: str,
+    make: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    date_field: Optional[str],
+) -> str:
+    # Many manufacturers include suffixes like "TESLA, INC."; use prefix match.
+    filters = [f"upper({make_field}) LIKE '{make.upper()}%'"]
+    if date_field and start_date:
+        filters.append(f"{date_field} >= '{start_date}'")
+    if date_field and end_date:
+        filters.append(f"{date_field} <= '{end_date}'")
+    return " AND ".join(filters)
 
 # ---------------------------------------------------------------------
 # Public extractors
@@ -114,36 +176,60 @@ def extract_recalls(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> List[Dict]:
-    """
-    Extract recall records for a given make and date range.
-
-    Parameters
-    ----------
-    make : str
-        Vehicle make (e.g. 'TESLA').
-    start_date : str, optional
-        ISO date string (YYYY-MM-DD).
-    end_date : str, optional
-        ISO date string (YYYY-MM-DD).
-
-    Returns
-    -------
-    List[Dict]
-        Raw recall records.
-    """
-    filters = [f"upper(make) = '{make.upper()}'"]
-
-    if start_date:
-        filters.append(f"report_received_date >= '{start_date}'")
-    if end_date:
-        filters.append(f"report_received_date <= '{end_date}'")
-
-    where_clause = " AND ".join(filters)
-
-    return _fetch_socrata(
+    # Probe one row to discover actual field names without downloading everything.
+    probe = _fetch_socrata(
         dataset_id=RECALLS_DATASET_ID,
-        where_clause=where_clause,
+        where_clause=None,
+        max_pages=1,
     )
+
+    make_field = "make"
+    date_field = None
+    if probe:
+        # Recalls Data uses `manufacturer` (not `make`) on this dataset.
+        if "manufacturer" in probe[0] and "make" not in probe[0]:
+            make_field = "manufacturer"
+        date_field = _first_present_field(probe[0], RECALLS_DATE_FIELDS)
+        logger.info("Recalls fields detected: make_field=%s date_field=%s", make_field, date_field)
+
+    where_clause = _build_where_clause(make_field, make, start_date, end_date, date_field)
+
+    return _fetch_socrata(dataset_id=RECALLS_DATASET_ID, where_clause=where_clause)
+
+
+
+# --- NHTSA complaints API extractor ---
+
+def extract_complaints_by_vehicle(
+    make: str,
+    model: str,
+    model_year: int,
+) -> List[Dict]:
+    """Extract complaints from NHTSA's official API for a specific make/model/year.
+
+    NHTSA endpoint (documented):
+      /complaints/complaintsByVehicle?make={MAKE}&model={MODEL}&modelYear={YEAR}
+
+    Returns a list of complaint records (dicts). This endpoint does not expose
+    a general date-range filter; filtering by date is handled downstream.
+    """
+    url = f"{NHTSA_API_BASE_URL}/complaints/complaintsByVehicle"
+    params = {"make": make, "model": model, "modelYear": str(model_year)}
+    headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+
+    logger.info("Fetching NHTSA complaints | make=%s model=%s year=%s", make, model, model_year)
+    resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT, headers=headers)
+    if resp.status_code >= 400:
+        msg = f"HTTP {resp.status_code} fetching {url} params={params}. Response: {resp.text[:500]}"
+        raise requests.HTTPError(msg, response=resp)
+
+    data = resp.json()
+    # NHTSA responses commonly include a "results" array.
+    results = data.get("results") or data.get("Results") or []
+    if not isinstance(results, list):
+        results = []
+    logger.info("Fetched %s NHTSA complaint records", len(results))
+    return results
 
 
 def extract_complaints(
@@ -151,33 +237,44 @@ def extract_complaints(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> List[Dict]:
+    """Convenience wrapper to keep Day-1 ergonomics.
+
+    Because the DOT Socrata "Complaints Flat File" view is non-tabular (403 for
+    row/column access), we use NHTSA's complaintsByVehicle endpoint.
+
+    Provide the vehicle via env vars:
+      RECALLWATCH_MODEL=...
+      RECALLWATCH_MODEL_YEAR=...
+
+    Date filtering (start_date/end_date) is accepted for API symmetry but is
+    applied downstream (dbt staging) because the endpoint doesn't support it.
     """
-    Extract complaint records for a given make and date range.
+    model = os.getenv("RECALLWATCH_MODEL")
+    year = os.getenv("RECALLWATCH_MODEL_YEAR")
+    if not model or not year:
+        raise ValueError(
+            "extract_complaints requires RECALLWATCH_MODEL and RECALLWATCH_MODEL_YEAR env vars. "
+            "Example: RECALLWATCH_MODEL=MODEL3 RECALLWATCH_MODEL_YEAR=2024"
+        )
 
-    Parameters
-    ----------
-    make : str
-        Vehicle make (e.g. 'TESLA').
-    start_date : str, optional
-        ISO date string (YYYY-MM-DD).
-    end_date : str, optional
-        ISO date string (YYYY-MM-DD).
+    return extract_complaints_by_vehicle(make=make, model=model, model_year=int(year))
 
-    Returns
-    -------
-    List[Dict]
-        Raw complaint records.
-    """
-    filters = [f"upper(make) = '{make.upper()}'"]
 
-    if start_date:
-        filters.append(f"date_received >= '{start_date}'")
-    if end_date:
-        filters.append(f"date_received <= '{end_date}'")
+if __name__ == "__main__":
+    make = os.getenv("RECALLWATCH_MAKE", "TESLA")
+    start = os.getenv("RECALLWATCH_START", "2024-01-01")
+    end = os.getenv("RECALLWATCH_END", "2024-12-31")
 
-    where_clause = " AND ".join(filters)
+    recalls = extract_recalls(make=make, start_date=start, end_date=end)
+    print(f"Fetched {len(recalls)} recall records for {make}")
+    if recalls:
+        print("recalls[0] keys:", sorted(recalls[0].keys()))
 
-    return _fetch_socrata(
-        dataset_id=COMPLAINTS_DATASET_ID,
-        where_clause=where_clause,
-    )
+    # Complaints: requires RECALLWATCH_MODEL and RECALLWATCH_MODEL_YEAR env vars.
+    try:
+        complaints = extract_complaints(make=make, start_date=start, end_date=end)
+        print(f"Fetched {len(complaints)} complaint records for {make}")
+        if complaints:
+            print("complaints[0] keys:", sorted(complaints[0].keys()))
+    except Exception as e:
+        print("Complaints extraction skipped:", e)
